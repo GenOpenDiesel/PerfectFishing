@@ -1,0 +1,36 @@
+enabled: true
+
+# Procent bran ryby, przy ktorych odpali sie minigierka.
+# 35 = mniej wiecej co trzecie branie. 100 = zawsze.
+chance-percent: 35.0
+
+# Co ile prob zapisac statystyki do stats.yml.
+# Wyzej = mniej zapisu na dysk. Przy restarcie plugin i tak zapisuje wszystko.
+stats-save-every: 25
+
+# Dlugosc paska widocznego w subtitle.
+bar-length: 21
+
+# Szerokosc zielonego pola. Im mniej, tym trudniej.
+target-width: 3
+
+# Po ilu tickach proba wygasa. 20 tickow = 1 sekunda.
+max-ticks: 42
+
+# Co ile tickow przesuwa sie znacznik. 1 = szybko i plynnie, 2 = latwiej.
+update-period-ticks: 1
+
+# true = zielone pole pojawia sie w losowym miejscu.
+# false = zielone pole jest na srodku.
+random-target: true
+
+messages:
+  title: "&bZACINAJ!"
+  success-title: "&aPERFECT!"
+  success-subtitle: "&7Ryba zlowiona."
+  fail-title: "&cRYBA UCIEKLA!"
+  fail-subtitle: "&7Nie trafiles w zielone pole."
+
+sounds:
+  success: ENTITY_EXPERIENCE_ORB_PICKUP
+  fail: ENTITY_ITEM_BREAK

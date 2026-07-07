@@ -1,0 +1,17 @@
+name: PerfectFishing
+version: 1.0.0
+main: pl.bfscode.perfectfishing.PerfectFishingPlugin
+api-version: '1.20'
+softdepend:
+  - EvenMoreFish
+  - PlaceholderAPI
+commands:
+  perfectfishing:
+    description: PerfectFishing admin command
+    usage: /perfectfishing reload
+    aliases:
+      - pfishing
+      - pfish
+permissions:
+  perfectfishing.admin:
+    default: op
