@@ -1,5 +1,5 @@
 name: PerfectFishing
-version: 1.0.0
+version: 1.1.0
 main: pl.bfscode.perfectfishing.PerfectFishingPlugin
 api-version: '1.20'
 softdepend:
@@ -14,4 +14,7 @@ commands:
       - pfish
 permissions:
   perfectfishing.admin:
+    default: op
+  perfectfishing.alerts:
+    description: Otrzymuje alerty o podejrzeniu automatu na ryby.
     default: op

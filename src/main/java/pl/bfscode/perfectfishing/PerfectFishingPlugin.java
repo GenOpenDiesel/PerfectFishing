@@ -16,6 +16,7 @@ import org.bukkit.event.EventHandler;
 import org.bukkit.event.EventPriority;
 import org.bukkit.event.Listener;
 import org.bukkit.event.player.PlayerFishEvent;
+import org.bukkit.event.player.PlayerQuitEvent;
 import org.bukkit.plugin.Plugin;
 import org.bukkit.plugin.java.JavaPlugin;
 
@@ -33,6 +34,7 @@ public final class PerfectFishingPlugin extends JavaPlugin implements Listener {
     private final Map<UUID, Challenge> challenges = new ConcurrentHashMap<>();
     private final Map<UUID, Long> blockedCatches = new ConcurrentHashMap<>();
     private final Map<UUID, PlayerStats> stats = new ConcurrentHashMap<>();
+    private final Map<UUID, Detector> detectors = new ConcurrentHashMap<>();
     private final Random random = new Random();
     private File statsFile;
     private FileConfiguration statsConfig;
@@ -54,6 +56,19 @@ public final class PerfectFishingPlugin extends JavaPlugin implements Listener {
     private String successSound;
     private String failSound;
 
+    private boolean acEnabled;
+    private int acMinSamples;
+    private int acWindowSize;
+    private double acMaxSuccessRate;
+    private double acMinReactionStddevMs;
+    private long acHumanFloorMs;
+    private double acMaxInstantFraction;
+    private boolean acRequireBoth;
+    private long acAlertCooldownMs;
+    private boolean acNotifyStaff;
+    private boolean acLogToFile;
+    private java.util.List<String> acCommands;
+
     @Override
     public void onEnable() {
         saveDefaultConfig();
@@ -69,6 +84,7 @@ public final class PerfectFishingPlugin extends JavaPlugin implements Listener {
         challenges.values().forEach(Challenge::cancelTask);
         challenges.clear();
         blockedCatches.clear();
+        detectors.clear();
         saveStats();
     }
 
@@ -132,14 +148,17 @@ public final class PerfectFishingPlugin extends JavaPlugin implements Listener {
         }
 
         challenge.cancelTask();
+        long reactionMs = System.currentTimeMillis() - challenge.startMillis;
         if (challenge.isPerfect()) {
             recordSuccess(player.getUniqueId());
+            feedDetector(player, reactionMs, true);
             sendTitle(player, successTitle, successSubtitle, 0, 16, 4);
             playConfiguredSound(player, successSound);
             return;
         }
 
         recordFail(player.getUniqueId());
+        feedDetector(player, reactionMs, false);
         blockNextCatch(player.getUniqueId());
         cancelCatch(event);
         sendTitle(player, failTitle, failSubtitle, 0, 18, 6);
@@ -165,6 +184,17 @@ public final class PerfectFishingPlugin extends JavaPlugin implements Listener {
         }
     }
 
+    @EventHandler
+    public void onQuit(PlayerQuitEvent event) {
+        UUID uuid = event.getPlayer().getUniqueId();
+        Challenge challenge = challenges.remove(uuid);
+        if (challenge != null) {
+            challenge.cancelTask();
+        }
+        detectors.remove(uuid);
+        blockedCatches.remove(uuid);
+    }
+
     private void playMovingTitle(Player player, Challenge challenge) {
         TaskHandle task = scheduleRepeating(player, () -> {
             if (!player.isOnline()) {
@@ -176,6 +206,7 @@ public final class PerfectFishingPlugin extends JavaPlugin implements Listener {
             if (challenge.ageTicks > maxTicks) {
                 challenges.remove(challenge.playerId);
                 recordFail(challenge.playerId);
+                feedDetector(player, -1L, false);
                 blockNextCatch(challenge.playerId);
                 challenge.cancelTask();
                 sendTitle(player, failTitle, failSubtitle, 0, 18, 6);
@@ -288,6 +319,19 @@ public final class PerfectFishingPlugin extends JavaPlugin implements Listener {
         failSubtitle = getConfig().getString("messages.fail-subtitle", "&7Nie trafiles w zielone pole.");
         successSound = getConfig().getString("sounds.success", "ENTITY_EXPERIENCE_ORB_PICKUP");
         failSound = getConfig().getString("sounds.fail", "ENTITY_ITEM_BREAK");
+
+        acEnabled = getConfig().getBoolean("anticheat.enabled", true);
+        acMinSamples = clamp(getConfig().getInt("anticheat.min-samples", 25), 5, 1000);
+        acWindowSize = clamp(getConfig().getInt("anticheat.window-size", 40), acMinSamples, 1000);
+        acMaxSuccessRate = clampDouble(getConfig().getDouble("anticheat.max-success-rate", 94.0D), 1.0D, 100.0D);
+        acMinReactionStddevMs = clampDouble(getConfig().getDouble("anticheat.min-reaction-stddev-ms", 45.0D), 0.0D, 5000.0D);
+        acHumanFloorMs = clamp(getConfig().getInt("anticheat.human-floor-ms", 120), 0, 5000);
+        acMaxInstantFraction = clampDouble(getConfig().getDouble("anticheat.max-instant-fraction", 0.5D), 0.0D, 1.0D);
+        acRequireBoth = getConfig().getBoolean("anticheat.require-both-signals", true);
+        acAlertCooldownMs = clamp(getConfig().getInt("anticheat.alert-cooldown-seconds", 120), 0, 86400) * 1000L;
+        acNotifyStaff = getConfig().getBoolean("anticheat.notify-staff", true);
+        acLogToFile = getConfig().getBoolean("anticheat.log-to-file", true);
+        acCommands = getConfig().getStringList("anticheat.commands");
     }
 
     private int clamp(int value, int min, int max) {
@@ -315,6 +359,7 @@ public final class PerfectFishingPlugin extends JavaPlugin implements Listener {
                 playerStats.fails = statsConfig.getInt(path + "fails");
                 playerStats.streak = statsConfig.getInt(path + "streak");
                 playerStats.bestStreak = statsConfig.getInt(path + "best-streak");
+                playerStats.flags = statsConfig.getInt(path + "flags");
                 stats.put(uuid, playerStats);
             } catch (IllegalArgumentException ignored) {
                 getLogger().warning("Invalid UUID in stats.yml: " + key);
@@ -334,6 +379,7 @@ public final class PerfectFishingPlugin extends JavaPlugin implements Listener {
             statsConfig.set(path + "fails", playerStats.fails);
             statsConfig.set(path + "streak", playerStats.streak);
             statsConfig.set(path + "best-streak", playerStats.bestStreak);
+            statsConfig.set(path + "flags", playerStats.flags);
         });
 
         try {
@@ -372,6 +418,173 @@ public final class PerfectFishingPlugin extends JavaPlugin implements Listener {
         return stats.getOrDefault(playerId, PlayerStats.EMPTY);
     }
 
+    private void feedDetector(Player player, long reactionMs, boolean perfect) {
+        if (!acEnabled) {
+            return;
+        }
+        Detector detector = detectors.computeIfAbsent(player.getUniqueId(), ignored -> new Detector());
+        detector.add(reactionMs, perfect, acWindowSize);
+        evaluate(player, detector);
+    }
+
+    private void evaluate(Player player, Detector detector) {
+        int total = detector.samples.size();
+        if (total < acMinSamples) {
+            return;
+        }
+
+        int perfects = 0;
+        int timed = 0;
+        int instant = 0;
+        double sum = 0.0D;
+        for (long[] sample : detector.samples) {
+            if (sample[1] == 1L) {
+                perfects++;
+            }
+            if (sample[0] >= 0L) {
+                timed++;
+                sum += sample[0];
+                if (sample[0] < acHumanFloorMs) {
+                    instant++;
+                }
+            }
+        }
+
+        double successRate = perfects * 100.0D / total;
+        double mean = timed > 0 ? sum / timed : 0.0D;
+        double variance = 0.0D;
+        if (timed > 1) {
+            for (long[] sample : detector.samples) {
+                if (sample[0] >= 0L) {
+                    double diff = sample[0] - mean;
+                    variance += diff * diff;
+                }
+            }
+            variance /= timed;
+        }
+        double stddev = Math.sqrt(variance);
+        double instantFraction = timed > 0 ? (double) instant / timed : 0.0D;
+
+        boolean superhuman = successRate >= acMaxSuccessRate;
+        boolean tooConsistent = timed >= 2 && stddev <= acMinReactionStddevMs;
+        boolean tooFast = timed >= 2 && instantFraction >= acMaxInstantFraction;
+
+        boolean flagged = acRequireBoth
+                ? superhuman && (tooConsistent || tooFast)
+                : superhuman || tooConsistent || tooFast;
+
+        detector.flagged = flagged;
+        if (!flagged) {
+            return;
+        }
+
+        long now = System.currentTimeMillis();
+        if (now - detector.lastAlertMs < acAlertCooldownMs) {
+            return;
+        }
+        detector.lastAlertMs = now;
+
+        StringBuilder reason = new StringBuilder();
+        if (superhuman) {
+            reason.append(String.format(java.util.Locale.US, "trafienia %.0f%%", successRate));
+        }
+        if (tooConsistent) {
+            if (reason.length() > 0) {
+                reason.append(", ");
+            }
+            reason.append(String.format(java.util.Locale.US, "rozrzut reakcji %.0fms", stddev));
+        }
+        if (tooFast) {
+            if (reason.length() > 0) {
+                reason.append(", ");
+            }
+            reason.append(String.format(java.util.Locale.US, "%.0f%% reakcji <%dms", instantFraction * 100.0D, acHumanFloorMs));
+        }
+
+        recordFlag(player.getUniqueId());
+        writeAbuseLog(player, reason.toString(), successRate, stddev, total);
+        fireAlert(player, reason.toString(), successRate, stddev);
+    }
+
+    private void writeAbuseLog(Player player, String reason, double successRate, double stddev, int samples) {
+        if (!acLogToFile) {
+            return;
+        }
+        String timestamp = java.time.LocalDateTime.now()
+                .format(java.time.format.DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss"));
+        String line = String.format(java.util.Locale.US,
+                "[%s] %s (%s) - %s - trafienia %.1f%%, rozrzut %.0fms, prob %d%n",
+                timestamp, player.getName(), player.getUniqueId(), reason, successRate, stddev, samples);
+        runAsync(() -> {
+            File logFile = new File(getDataFolder(), "naduzycia.log");
+            try {
+                if (!getDataFolder().exists()) {
+                    getDataFolder().mkdirs();
+                }
+                java.nio.file.Files.writeString(logFile.toPath(), line,
+                        java.nio.charset.StandardCharsets.UTF_8,
+                        java.nio.file.StandardOpenOption.CREATE,
+                        java.nio.file.StandardOpenOption.APPEND);
+            } catch (IOException exception) {
+                getLogger().warning("Nie mozna zapisac naduzycia.log: " + exception.getMessage());
+            }
+        });
+    }
+
+    private void runAsync(Runnable runnable) {
+        try {
+            Object scheduler = Bukkit.class.getMethod("getAsyncScheduler").invoke(null);
+            scheduler.getClass()
+                    .getMethod("runNow", Plugin.class, Consumer.class)
+                    .invoke(scheduler, this, (Consumer<Object>) ignored -> runnable.run());
+        } catch (ReflectiveOperationException ignored) {
+            Bukkit.getScheduler().runTaskAsynchronously(this, runnable);
+        }
+    }
+
+    private void fireAlert(Player player, String reason, double successRate, double stddev) {
+        String name = player.getName();
+        getLogger().warning("Mozliwy automat na ryby: " + name + " (" + reason + ")");
+        String message = color("&8[&bPerfectFishing&8] &e" + name
+                + " &7moze uzywac automatu na ryby &8(" + reason + ")");
+        runGlobal(() -> {
+            if (acNotifyStaff) {
+                for (Player online : Bukkit.getOnlinePlayers()) {
+                    if (online.hasPermission("perfectfishing.alerts")) {
+                        online.sendMessage(message);
+                    }
+                }
+            }
+            for (String command : acCommands) {
+                if (command == null || command.isBlank()) {
+                    continue;
+                }
+                String parsed = command
+                        .replace("%player%", name)
+                        .replace("%success_rate%", String.format(java.util.Locale.US, "%.1f", successRate))
+                        .replace("%reaction_stddev%", String.format(java.util.Locale.US, "%.0f", stddev));
+                Bukkit.dispatchCommand(Bukkit.getConsoleSender(), parsed);
+            }
+        });
+    }
+
+    private void runGlobal(Runnable runnable) {
+        try {
+            Object scheduler = Bukkit.class.getMethod("getGlobalRegionScheduler").invoke(null);
+            scheduler.getClass()
+                    .getMethod("run", Plugin.class, Consumer.class)
+                    .invoke(scheduler, this, (Consumer<Object>) ignored -> runnable.run());
+        } catch (ReflectiveOperationException ignored) {
+            Bukkit.getScheduler().runTask(this, runnable);
+        }
+    }
+
+    private void recordFlag(UUID playerId) {
+        PlayerStats playerStats = stats.computeIfAbsent(playerId, ignored -> new PlayerStats());
+        playerStats.flags++;
+        markStatsDirty();
+    }
+
     private void registerPlaceholders() {
         if (!Bukkit.getPluginManager().isPluginEnabled("PlaceholderAPI")) {
             getLogger().info("PlaceholderAPI not found. Placeholders disabled.");
@@ -385,6 +598,7 @@ public final class PerfectFishingPlugin extends JavaPlugin implements Listener {
         private final UUID playerId;
         private final int targetStart;
         private final int targetWidth;
+        private final long startMillis = System.currentTimeMillis();
         private int marker;
         private int direction = 1;
         private int ageTicks;
@@ -428,6 +642,19 @@ public final class PerfectFishingPlugin extends JavaPlugin implements Listener {
         void cancel();
     }
 
+    private static final class Detector {
+        private final java.util.ArrayDeque<long[]> samples = new java.util.ArrayDeque<>();
+        private long lastAlertMs;
+        private boolean flagged;
+
+        private void add(long reactionMs, boolean perfect, int window) {
+            samples.addLast(new long[]{reactionMs, perfect ? 1L : 0L});
+            while (samples.size() > window) {
+                samples.removeFirst();
+            }
+        }
+    }
+
     private static final class PlayerStats {
         private static final PlayerStats EMPTY = new PlayerStats();
         private int attempts;
@@ -435,6 +662,7 @@ public final class PerfectFishingPlugin extends JavaPlugin implements Listener {
         private int fails;
         private int streak;
         private int bestStreak;
+        private int flags;
 
         private int successRate() {
             if (attempts <= 0) {
@@ -480,6 +708,11 @@ public final class PerfectFishingPlugin extends JavaPlugin implements Listener {
                 case "streak" -> String.valueOf(playerStats.streak);
                 case "best_streak" -> String.valueOf(playerStats.bestStreak);
                 case "success_rate" -> String.valueOf(playerStats.successRate());
+                case "flags" -> String.valueOf(playerStats.flags);
+                case "suspicious" -> {
+                    Detector detector = detectors.get(player.getUniqueId());
+                    yield String.valueOf(detector != null && detector.flagged);
+                }
                 default -> "";
             };
         }

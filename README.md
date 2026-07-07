@@ -17,6 +17,14 @@ When a fish bites, players see a moving title/subtitle bar. They must reel in wh
 - `%perfectfishing_streak%`
 - `%perfectfishing_best_streak%`
 - `%perfectfishing_success_rate%`
+- `%perfectfishing_flags%` — how many times the player has been flagged as suspicious
+- `%perfectfishing_suspicious%` — `true`/`false`, whether the player is currently flagged
+
+## Anti-macro detection
+
+The minigame requires reeling exactly when the marker is inside the green zone (random position, narrow window). A screen-reading macro gives itself away by having **both** a near-100% hit rate **and** a very low reaction-time variance at the same time — a human cannot do both. The plugin analyses a rolling window of recent attempts and flags a player once these signals overlap.
+
+On a flag: a log entry, an alert to players holding `perfectfishing.alerts`, and optional console commands. Everything is configurable under the `anticheat` section in `config.yml`.
 
 ## Release Automation
 

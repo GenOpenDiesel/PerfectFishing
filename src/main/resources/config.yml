@@ -34,3 +34,50 @@ messages:
 sounds:
   success: ENTITY_EXPERIENCE_ORB_PICKUP
   fail: ENTITY_ITEM_BREAK
+
+# Wykrywanie automatow (makra) na lowienie ryb.
+# Bot ktory czyta ekran ma JEDNOCZESNIE prawie 100% trafien ORAZ bardzo
+# rowny (maly rozrzut) czas reakcji - czlowiek tak nie potrafi. Dopiero
+# skrzyzowanie tych sygnalow oznacza gracza jako podejrzanego.
+anticheat:
+  enabled: true
+
+  # Minimalna liczba prob zanim gracz w ogole moze zostac oznaczony.
+  # Nizej = szybciej wykrywa, ale wiecej falszywych alarmow.
+  min-samples: 25
+
+  # Ile ostatnich prob jest analizowanych (okno kroczace).
+  window-size: 40
+
+  # Oznacz, jesli skutecznosc trafien w oknie jest >= tej wartosci (%).
+  max-success-rate: 94.0
+
+  # Oznacz, jesli rozrzut (odchylenie std.) czasu reakcji jest <= tylu ms.
+  # Maly rozrzut = zbyt rowna, robotyczna reakcja.
+  min-reaction-stddev-ms: 45
+
+  # Reakcje szybsze niz tyle ms uznajemy za "nieludzkie".
+  human-floor-ms: 120
+
+  # Oznacz, jesli taka czesc okna (0-1) ma reakcje ponizej human-floor-ms.
+  max-instant-fraction: 0.5
+
+  # true = wymagaj wysokiej skutecznosci ORAZ (rowna LUB za szybka reakcja).
+  #        Bezpieczniejsze, mniej falszywych alarmow.
+  # false = wystarczy jeden z sygnalow.
+  require-both-signals: true
+
+  # Ile sekund odstepu miedzy kolejnymi alertami o tym samym graczu.
+  alert-cooldown-seconds: 120
+
+  # Wyslij wiadomosc do graczy online z permisja perfectfishing.alerts.
+  notify-staff: true
+
+  # Zapisuj kazde wykryte naduzycie do pliku plugins/PerfectFishing/naduzycia.log.
+  log-to-file: true
+
+  # Komendy z konsoli przy oznaczeniu. Zmienne: %player%, %success_rate%, %reaction_stddev%.
+  # Pusta lista = brak komend. Przyklad:
+  # commands:
+  #   - "cmi warn %player% Podejrzenie automatu na ryby (%success_rate%%)"
+  commands: []
