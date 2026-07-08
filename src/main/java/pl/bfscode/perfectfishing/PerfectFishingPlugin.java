@@ -241,8 +241,13 @@ public final class PerfectFishingPlugin extends JavaPlugin implements Listener {
             // at least once. A catch that lands before this (reeling on the same
             // tick as the bite, before the marker moves) can never be a perfect.
             challenge.armed = true;
-            sendTitle(player, title, renderBar(challenge), 0, updatePeriodTicks + 4, 0);
+            // Advance the marker BEFORE rendering so the position we draw is the
+            // exact same position isPerfect() will evaluate on a reel. Rendering
+            // first and stepping afterwards left the internal marker one step
+            // ahead of what the player saw, so a click on the edge of the green
+            // zone was judged against the next position and wrongly failed.
             challenge.step();
+            sendTitle(player, title, renderBar(challenge), 0, updatePeriodTicks + 4, 0);
         }, 0L, updatePeriodTicks);
         challenge.task = task;
     }
