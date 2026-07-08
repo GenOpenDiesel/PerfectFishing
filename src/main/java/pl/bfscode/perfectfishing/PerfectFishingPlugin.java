@@ -37,6 +37,7 @@ public final class PerfectFishingPlugin extends JavaPlugin implements Listener {
     private final Map<UUID, Long> blockedCatches = new ConcurrentHashMap<>();
     private final Map<UUID, PlayerStats> stats = new ConcurrentHashMap<>();
     private final Map<UUID, Detector> detectors = new ConcurrentHashMap<>();
+    private final Map<UUID, ExploitState> exploitStates = new ConcurrentHashMap<>();
     private final Random random = new Random();
     private File statsFile;
     private FileConfiguration statsConfig;
@@ -70,6 +71,12 @@ public final class PerfectFishingPlugin extends JavaPlugin implements Listener {
     private boolean acNotifyStaff;
     private boolean acLogToFile;
     private java.util.List<String> acCommands;
+
+    private boolean exEnabled;
+    private boolean exLogToFile;
+    private boolean exNotifyStaff;
+    private long exAlertCooldownMs;
+    private int exSpamThreshold;
 
     @Override
     public void onEnable() {
@@ -123,6 +130,8 @@ public final class PerfectFishingPlugin extends JavaPlugin implements Listener {
         if (previous != null) {
             previous.cancelTask();
         }
+        // A fresh bite ends any residual-fish spam burst from the last attempt.
+        resetExploitStreak(uuid);
 
         if (random.nextDouble() * 100.0D >= chancePercent) {
             return;
@@ -149,6 +158,7 @@ public final class PerfectFishingPlugin extends JavaPlugin implements Listener {
         if (challenge == null) {
             if (isCatchBlocked(player.getUniqueId())) {
                 cancelCatch(event);
+                registerBlockedCatch(player);
             }
             return;
         }
@@ -163,6 +173,12 @@ public final class PerfectFishingPlugin extends JavaPlugin implements Listener {
             return;
         }
 
+        if (!challenge.armed) {
+            // Catch landed before the bar was ever shown - the player was already
+            // clicking through the bite to skip the minigame.
+            logExploit(player, "INSTANT_REEL",
+                    "zaciecie przed pokazaniem paska (reakcja " + Math.max(0L, reactionMs) + "ms)");
+        }
         recordFail(player.getUniqueId());
         feedDetector(player, reactionMs, false);
         blockNextCatch(player.getUniqueId());
@@ -199,6 +215,7 @@ public final class PerfectFishingPlugin extends JavaPlugin implements Listener {
         }
         detectors.remove(uuid);
         blockedCatches.remove(uuid);
+        exploitStates.remove(uuid);
     }
 
     private void playMovingTitle(Player player, Challenge challenge) {
@@ -345,6 +362,12 @@ public final class PerfectFishingPlugin extends JavaPlugin implements Listener {
         acNotifyStaff = getConfig().getBoolean("anticheat.notify-staff", true);
         acLogToFile = getConfig().getBoolean("anticheat.log-to-file", true);
         acCommands = getConfig().getStringList("anticheat.commands");
+
+        exEnabled = getConfig().getBoolean("exploit-logging.enabled", true);
+        exLogToFile = getConfig().getBoolean("exploit-logging.log-to-file", true);
+        exNotifyStaff = getConfig().getBoolean("exploit-logging.notify-staff", true);
+        exAlertCooldownMs = clamp(getConfig().getInt("exploit-logging.alert-cooldown-seconds", 60), 0, 86400) * 1000L;
+        exSpamThreshold = clamp(getConfig().getInt("exploit-logging.spam-threshold", 2), 1, 100);
     }
 
     private int clamp(int value, int min, int max) {
@@ -373,6 +396,7 @@ public final class PerfectFishingPlugin extends JavaPlugin implements Listener {
                 playerStats.streak = statsConfig.getInt(path + "streak");
                 playerStats.bestStreak = statsConfig.getInt(path + "best-streak");
                 playerStats.flags = statsConfig.getInt(path + "flags");
+                playerStats.exploitAttempts = statsConfig.getInt(path + "exploit-attempts");
                 stats.put(uuid, playerStats);
             } catch (IllegalArgumentException ignored) {
                 getLogger().warning("Invalid UUID in stats.yml: " + key);
@@ -393,6 +417,7 @@ public final class PerfectFishingPlugin extends JavaPlugin implements Listener {
             statsConfig.set(path + "streak", playerStats.streak);
             statsConfig.set(path + "best-streak", playerStats.bestStreak);
             statsConfig.set(path + "flags", playerStats.flags);
+            statsConfig.set(path + "exploit-attempts", playerStats.exploitAttempts);
         });
 
         try {
@@ -598,6 +623,88 @@ public final class PerfectFishingPlugin extends JavaPlugin implements Listener {
         markStatsDirty();
     }
 
+    private void resetExploitStreak(UUID playerId) {
+        ExploitState state = exploitStates.get(playerId);
+        if (state != null) {
+            state.blockedStreak = 0;
+        }
+    }
+
+    private void registerBlockedCatch(Player player) {
+        if (!exEnabled) {
+            return;
+        }
+        ExploitState state = exploitStates.computeIfAbsent(player.getUniqueId(), ignored -> new ExploitState());
+        state.blockedStreak++;
+        if (state.blockedStreak >= exSpamThreshold) {
+            logExploit(player, "SPAM_CATCH",
+                    state.blockedStreak + " zablokowanych zlowien z rzedu (spam po nietrafionej minigrze)");
+        }
+    }
+
+    private void logExploit(Player player, String type, String detail) {
+        if (!exEnabled) {
+            return;
+        }
+        recordExploitAttempt(player.getUniqueId());
+        if (exLogToFile) {
+            writeExploitLog(player, type, detail);
+        }
+        fireExploitAlert(player, type, detail);
+    }
+
+    private void writeExploitLog(Player player, String type, String detail) {
+        String timestamp = java.time.LocalDateTime.now()
+                .format(java.time.format.DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss"));
+        String line = String.format(java.util.Locale.US,
+                "[%s] %s (%s) - %s - %s%n",
+                timestamp, player.getName(), player.getUniqueId(), type, detail);
+        runAsync(() -> {
+            File logFile = new File(getDataFolder(), "exploity.log");
+            try {
+                if (!getDataFolder().exists()) {
+                    getDataFolder().mkdirs();
+                }
+                java.nio.file.Files.writeString(logFile.toPath(), line,
+                        java.nio.charset.StandardCharsets.UTF_8,
+                        java.nio.file.StandardOpenOption.CREATE,
+                        java.nio.file.StandardOpenOption.APPEND);
+            } catch (IOException exception) {
+                getLogger().warning("Nie mozna zapisac exploity.log: " + exception.getMessage());
+            }
+        });
+    }
+
+    private void fireExploitAlert(Player player, String type, String detail) {
+        ExploitState state = exploitStates.computeIfAbsent(player.getUniqueId(), ignored -> new ExploitState());
+        long now = System.currentTimeMillis();
+        if (now - state.lastAlertMs < exAlertCooldownMs) {
+            return;
+        }
+        state.lastAlertMs = now;
+
+        String name = player.getName();
+        getLogger().warning("Proba wykorzystania buga na ryby: " + name + " [" + type + "] " + detail);
+        if (!exNotifyStaff) {
+            return;
+        }
+        String message = color("&8[&bPerfectFishing&8] &e" + name
+                + " &7probuje wykorzystac buga na ryby &8(" + type + ": " + detail + ")");
+        runGlobal(() -> {
+            for (Player online : Bukkit.getOnlinePlayers()) {
+                if (online.hasPermission("perfectfishing.alerts")) {
+                    online.sendMessage(message);
+                }
+            }
+        });
+    }
+
+    private void recordExploitAttempt(UUID playerId) {
+        PlayerStats playerStats = stats.computeIfAbsent(playerId, ignored -> new PlayerStats());
+        playerStats.exploitAttempts++;
+        markStatsDirty();
+    }
+
     private void registerPlaceholders() {
         if (!Bukkit.getPluginManager().isPluginEnabled("PlaceholderAPI")) {
             getLogger().info("PlaceholderAPI not found. Placeholders disabled.");
@@ -656,6 +763,11 @@ public final class PerfectFishingPlugin extends JavaPlugin implements Listener {
         void cancel();
     }
 
+    private static final class ExploitState {
+        private int blockedStreak;
+        private long lastAlertMs;
+    }
+
     private static final class Detector {
         private final java.util.ArrayDeque<long[]> samples = new java.util.ArrayDeque<>();
         private long lastAlertMs;
@@ -677,6 +789,7 @@ public final class PerfectFishingPlugin extends JavaPlugin implements Listener {
         private int streak;
         private int bestStreak;
         private int flags;
+        private int exploitAttempts;
 
         private int successRate() {
             if (attempts <= 0) {
@@ -723,6 +836,7 @@ public final class PerfectFishingPlugin extends JavaPlugin implements Listener {
                 case "best_streak" -> String.valueOf(playerStats.bestStreak);
                 case "success_rate" -> String.valueOf(playerStats.successRate());
                 case "flags" -> String.valueOf(playerStats.flags);
+                case "exploit_attempts" -> String.valueOf(playerStats.exploitAttempts);
                 case "suspicious" -> {
                     Detector detector = detectors.get(player.getUniqueId());
                     yield String.valueOf(detector != null && detector.flagged);

@@ -81,3 +81,22 @@ anticheat:
   # commands:
   #   - "cmi warn %player% Podejrzenie automatu na ryby (%success_rate%%)"
   commands: []
+
+# Logowanie prob wykorzystania bledow minigierki (juz zalatanych).
+# Pokazuje KTO nadal probuje omijac minigre:
+#   SPAM_CATCH   - spamowanie klikniec po nietrafionej minigrze
+#   INSTANT_REEL - zaciecie zanim pasek sie w ogole pokaze
+exploit-logging:
+  enabled: true
+
+  # Zapisuj kazda wykryta probe do pliku plugins/PerfectFishing/exploity.log.
+  log-to-file: true
+
+  # Wyslij wiadomosc do graczy online z permisja perfectfishing.alerts.
+  notify-staff: true
+
+  # Ile sekund odstepu miedzy kolejnymi alertami o tym samym graczu.
+  alert-cooldown-seconds: 60
+
+  # Ile zablokowanych zlowien z rzedu uznajemy juz za spam (SPAM_CATCH).
+  spam-threshold: 2
