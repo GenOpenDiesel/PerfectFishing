@@ -31,6 +31,8 @@ import java.util.function.Consumer;
 
 public final class PerfectFishingPlugin extends JavaPlugin implements Listener {
 
+    private static final long CATCH_BLOCK_MS = 2500L;
+
     private final Map<UUID, Challenge> challenges = new ConcurrentHashMap<>();
     private final Map<UUID, Long> blockedCatches = new ConcurrentHashMap<>();
     private final Map<UUID, PlayerStats> stats = new ConcurrentHashMap<>();
@@ -112,14 +114,18 @@ public final class PerfectFishingPlugin extends JavaPlugin implements Listener {
         }
 
         Player player = event.getPlayer();
-        if (random.nextDouble() * 100.0D >= chancePercent) {
-            return;
-        }
-
         UUID uuid = player.getUniqueId();
+
+        // Always clear any leftover challenge from a previous bite before we
+        // decide whether this bite starts a new one, otherwise a failed chance
+        // roll would leave the old challenge (and its task) running.
         Challenge previous = challenges.remove(uuid);
         if (previous != null) {
             previous.cancelTask();
+        }
+
+        if (random.nextDouble() * 100.0D >= chancePercent) {
+            return;
         }
 
         int safeTargetWidth = Math.max(1, Math.min(targetWidth, barLength));
@@ -149,7 +155,7 @@ public final class PerfectFishingPlugin extends JavaPlugin implements Listener {
 
         challenge.cancelTask();
         long reactionMs = System.currentTimeMillis() - challenge.startMillis;
-        if (challenge.isPerfect()) {
+        if (challenge.armed && challenge.isPerfect()) {
             recordSuccess(player.getUniqueId());
             feedDetector(player, reactionMs, true);
             sendTitle(player, successTitle, successSubtitle, 0, 16, 4);
@@ -214,6 +220,10 @@ public final class PerfectFishingPlugin extends JavaPlugin implements Listener {
                 return;
             }
 
+            // The minigame is only "armed" once the bar has actually been shown
+            // at least once. A catch that lands before this (reeling on the same
+            // tick as the bite, before the marker moves) can never be a perfect.
+            challenge.armed = true;
             sendTitle(player, title, renderBar(challenge), 0, updatePeriodTicks + 4, 0);
             challenge.step();
         }, 0L, updatePeriodTicks);
@@ -262,7 +272,7 @@ public final class PerfectFishingPlugin extends JavaPlugin implements Listener {
     }
 
     private void blockNextCatch(UUID playerId) {
-        blockedCatches.put(playerId, System.currentTimeMillis() + 2500L);
+        blockedCatches.put(playerId, System.currentTimeMillis() + CATCH_BLOCK_MS);
     }
 
     private boolean isCatchBlocked(UUID playerId) {
@@ -274,7 +284,10 @@ public final class PerfectFishingPlugin extends JavaPlugin implements Listener {
             blockedCatches.remove(playerId);
             return false;
         }
-        blockedCatches.remove(playerId);
+        // Keep the block active for its full duration so a fast burst of
+        // clicks cannot slip a catch through after a single blocked attempt.
+        // Refresh the timer so continuous spamming can never simply wait it out.
+        blockedCatches.put(playerId, System.currentTimeMillis() + CATCH_BLOCK_MS);
         return true;
     }
 
@@ -602,6 +615,7 @@ public final class PerfectFishingPlugin extends JavaPlugin implements Listener {
         private int marker;
         private int direction = 1;
         private int ageTicks;
+        private boolean armed;
         private TaskHandle task;
 
         private Challenge(UUID playerId, int targetStart, int targetWidth) {
