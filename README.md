@@ -20,6 +20,11 @@ When a fish bites, players see a moving title/subtitle bar. They must reel in wh
 - `%perfectfishing_flags%` — how many times the player has been flagged as suspicious
 - `%perfectfishing_suspicious%` — `true`/`false`, whether the player is currently flagged
 - `%perfectfishing_exploit_attempts%` — how many times the player tried to exploit the fishing minigame
+- `%perfectfishing_etf_toggle%` — `true`/`false`, whether the player has EvenMoreFish custom fishing toggled on (i.e. the minigame runs for them); empty for offline players. `%perfectfishing_emf_toggle%` is an alias.
+
+## EvenMoreFish toggle
+
+If EvenMoreFish is installed, the minigame only runs for players who have EMF custom fishing toggled **on**. A player who used `/emf toggle` to turn custom fishing off fishes the plain vanilla way with no timing bar. When EvenMoreFish is not installed the minigame runs for everyone as usual. This needs no configuration and no EMF dependency — the toggle is read straight from the player's persistent data.
 
 ## Anti-macro detection
 

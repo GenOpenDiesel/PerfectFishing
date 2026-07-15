@@ -3,6 +3,7 @@ package pl.bfscode.perfectfishing;
 import me.clip.placeholderapi.expansion.PlaceholderExpansion;
 import org.bukkit.Bukkit;
 import org.bukkit.ChatColor;
+import org.bukkit.NamespacedKey;
 import org.bukkit.OfflinePlayer;
 import org.bukkit.Sound;
 import org.bukkit.command.Command;
@@ -17,6 +18,7 @@ import org.bukkit.event.EventPriority;
 import org.bukkit.event.Listener;
 import org.bukkit.event.player.PlayerFishEvent;
 import org.bukkit.event.player.PlayerQuitEvent;
+import org.bukkit.persistence.PersistentDataType;
 import org.bukkit.plugin.Plugin;
 import org.bukkit.plugin.java.JavaPlugin;
 
@@ -42,6 +44,14 @@ public final class PerfectFishingPlugin extends JavaPlugin implements Listener {
     private File statsFile;
     private FileConfiguration statsConfig;
     private int unsavedStats;
+
+    // EvenMoreFish (etf) integration. Resolved lazily: null = not looked up yet.
+    // When EvenMoreFish is installed, a player who ran /emf toggle to disable
+    // custom fishing stores a "fish-disabled" BOOLEAN in their PersistentData.
+    // We read that key directly so we need neither an EMF dependency nor
+    // reflection into EMF classes - the namespace comes from the live plugin.
+    private Boolean emfLookedUp;
+    private NamespacedKey emfFishDisabledKey;
 
     private boolean enabled;
     private double chancePercent;
@@ -122,6 +132,18 @@ public final class PerfectFishingPlugin extends JavaPlugin implements Listener {
 
         Player player = event.getPlayer();
         UUID uuid = player.getUniqueId();
+
+        // Only run the minigame when the player has EvenMoreFish custom fishing
+        // toggled ON. If they used /emf toggle to turn it off, they fish the
+        // vanilla way with no timing bar. Drop any residual challenge too so a
+        // toggle mid-session can never leave a task running.
+        if (isEmfFishingDisabled(player)) {
+            Challenge stale = challenges.remove(uuid);
+            if (stale != null) {
+                stale.cancelTask();
+            }
+            return;
+        }
 
         // Always clear any leftover challenge from a previous bite before we
         // decide whether this bite starts a new one, otherwise a failed chance
@@ -710,6 +732,32 @@ public final class PerfectFishingPlugin extends JavaPlugin implements Listener {
         markStatsDirty();
     }
 
+    /**
+     * @return true if EvenMoreFish is installed AND the player has custom
+     * fishing toggled off (/emf toggle). When EMF is absent this is always
+     * false, so the minigame runs for everyone as before.
+     */
+    private boolean isEmfFishingDisabled(Player player) {
+        NamespacedKey key = resolveEmfToggleKey();
+        if (key == null) {
+            return false;
+        }
+        return player.getPersistentDataContainer()
+                .getOrDefault(key, PersistentDataType.BOOLEAN, false);
+    }
+
+    private NamespacedKey resolveEmfToggleKey() {
+        if (emfLookedUp == null) {
+            Plugin emf = Bukkit.getPluginManager().getPlugin("EvenMoreFish");
+            if (emf != null) {
+                // Mirrors EMF's own NamespacedKey(plugin, "fish-disabled").
+                emfFishDisabledKey = new NamespacedKey(emf, "fish-disabled");
+            }
+            emfLookedUp = Boolean.TRUE;
+        }
+        return emfFishDisabledKey;
+    }
+
     private void registerPlaceholders() {
         if (!Bukkit.getPluginManager().isPluginEnabled("PlaceholderAPI")) {
             getLogger().info("PlaceholderAPI not found. Placeholders disabled.");
@@ -845,6 +893,15 @@ public final class PerfectFishingPlugin extends JavaPlugin implements Listener {
                 case "suspicious" -> {
                     Detector detector = detectors.get(player.getUniqueId());
                     yield String.valueOf(detector != null && detector.flagged);
+                }
+                case "etf_toggle", "emf_toggle" -> {
+                    // true = EMF custom fishing ON (minigame runs for the player),
+                    // false = toggled off. Empty for offline players (PDC read
+                    // needs an online player).
+                    if (player instanceof Player online) {
+                        yield String.valueOf(!isEmfFishingDisabled(online));
+                    }
+                    yield "";
                 }
                 default -> "";
             };
